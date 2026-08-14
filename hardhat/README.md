@@ -1,57 +1,41 @@
-# Sample Hardhat 3 Project (`node:test` and `viem`)
+# Ritual Predict — contracts
 
-This project showcases a Hardhat 3 project using the native Node.js test runner (`node:test`) and the `viem` library for Ethereum interactions.
+The `RitualPredict` market contract, its tests, and the deployment scripts.
+Full architecture and the workshop runbook live in [../README.md](../README.md).
 
-To learn more about Hardhat 3, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3](https://hardhat.org/hardhat3-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+## Layout
 
-## Project Overview
-
-This example project includes:
-
-- A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using [`node:test`](nodejs.org/api/test.html), the new Node.js native test runner, and [`viem`](https://viem.sh/).
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
-
-## Usage
-
-### Running Tests
-
-To run all the tests in the project, execute the following command:
-
-```shell
-npx hardhat test
+```
+contracts/
+  RitualPredict.sol          the market: creation, betting, autonomous resolution, payouts
+  RitualPredict.t.sol        Solidity unit tests
+  ritual/RitualChain.sol     canonical Ritual addresses + system contract interfaces
+  mocks/RitualMocks.sol      test-only stand-ins for the precompiles and system contracts
+test/
+  RitualPredict.e2e.ts       end-to-end walkthroughs of the workshop flow
+scripts/
+  block-time.ts              measure the chain's current block time
+  deploy.ts                  deploy + prepay execution fees
+  fund.ts                    top up the prepaid execution balance
+  status.ts                  live state of every market
+  create-demo-market.ts      create the preset market from the CLI
+  export-abi.ts              copy the compiled ABI into the frontend
 ```
 
-You can also selectively run the Solidity or `node:test` tests:
+## Commands
 
-```shell
-npx hardhat test solidity
-npx hardhat test nodejs
+```bash
+cp .env.example .env                            # RITUAL_PRIVATE_KEY, funded from the faucet
+
+npx hardhat test                                # 33 Solidity + 2 TypeScript tests
+npx hardhat test solidity                       # Solidity only
+npx hardhat build                               # compile
+
+npx hardhat run scripts/block-time.ts           # measure block time
+npx hardhat run scripts/deploy.ts               # deploy to Ritual Chain
+PREDICT_ADDRESS=0x... npx hardhat run scripts/status.ts
+PREDICT_ADDRESS=0x... npx hardhat run scripts/fund.ts
 ```
 
-### Make a deployment to Sepolia
-
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
-
-To run the deployment to a local chain:
-
-```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
-```
-
-To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
-
-You can set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin or by setting it as an environment variable.
-
-To set the `SEPOLIA_PRIVATE_KEY` config variable using `hardhat-keystore`:
-
-```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
-```
-
-After setting the variable, you can run the deployment with the Sepolia network:
-
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
-```
+Tests run entirely against mocks — `vm.etch` puts the mock runtime code at the canonical Ritual
+addresses — so no network access or funded account is needed.
