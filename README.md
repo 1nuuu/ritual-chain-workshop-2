@@ -71,3 +71,19 @@ automatically going forward.
 starter and correct; I left that logic untouched. `getMarket`, `getMarkets`,
 `decodeHttpResponse`, and `_jqUint` were also already present and, after review,
 already correct against the precompile ABI reference.
+
+### Why these two design choices, specifically
+
+**The Scheduler, not a cron job or backend.** A backend cron means someone has to
+keep a server running and paying gas forever, and it's a centralization point:
+if that server goes down, markets never resolve. Booking the resolution with
+the Scheduler at market creation time means the resolution is guaranteed by the
+chain itself, no off-chain process to babysit, and the retry logic (3 attempts,
+200 blocks apart) is enforced the same way regardless of who created the market.
+
+**Pull based payout, not looping over all bettors.** Looping over every bettor
+to push payouts in `onScheduledResolve` would make gas cost scale with the
+number of bettors, and a single failing transfer (e.g. to a contract that
+rejects ETH) would block everyone else's payout too. Pull based claims mean
+each bettor pays their own gas to claim, and one broken claim can never affect
+another bettor's ability to claim theirs.
