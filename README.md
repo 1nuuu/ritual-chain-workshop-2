@@ -12,7 +12,7 @@ and are ready to run once the testnet is back.
 
 The starter left five functions in `RitualPredict.sol` unfilled: `createMarket`,
 `onScheduledResolve`, `_readOracle`, `_pickExecutor`, and `_scheduleResolution`.
-I implemented all five against the design described earlier in this README:
+I implemented all five against the design described earlier in this:
 
 - **Block based deadlines**, not timestamps, so betting closing and the Scheduler
   waking the contract can never disagree.
