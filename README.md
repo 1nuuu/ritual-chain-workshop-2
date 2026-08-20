@@ -1,108 +1,73 @@
-# Ritual Predict
+## Submission Notes
 
-A self-resolving binary prediction market on [Ritual Chain](https://docs.ritualfoundation.org).
+### Environment
 
-Create a market like _"Will ETH/USD be at least $4,000 when this market resolves?"_, stake native
-RITUAL on YES or NO, and watch it settle itself. When the betting window closes, **nobody presses a
-resolve button and no backend cron job runs**. The Ritual Scheduler wakes the contract at a block
-fixed when the market was created; the contract calls the HTTP precompile to read the configured
-oracle URL, extracts one number with the jq precompile, compares it to the target, and settles.
-Winners then pull their proportional share of the pool.
+Ritual testnet was unavailable for the duration of this workshop, so all work
+here was done and verified against a local Hardhat network (edr simulated),
+not the live chain. Deployment to Ritual testnet itself was out of scope for
+that reason; the deploy scripts in `scripts/` are unchanged from the starter
+and are ready to run once the testnet is back.
 
----
+### What I implemented
 
-## Architecture
+The starter left five functions in `RitualPredict.sol` unfilled: `createMarket`,
+`onScheduledResolve`, `_readOracle`, `_pickExecutor`, and `_scheduleResolution`.
+I implemented all five against the design described earlier in this README:
 
-```
-                 createMarket()                    ┌──────────────────────────┐
-   user  ─────────────────────────────────────────▶│  RitualPredict.sol       │
-   user  ─────────── bet(id, YES|NO) ─────────────▶│                          │
-                                                   │  markets, pools, stakes  │
-                                     schedule() ◀──┤                          │
-                                                   └──────────────────────────┘
-    ┌─────────────────────────────┐                     ▲              │
-    │ Scheduler  0x56e7…D58B      │  onScheduledResolve │              │ deposit()
-    │ system contract             │─────────────────────┘              ▼
-    │ fires at resolveBlock,      │                        ┌────────────────────────┐
-    │ 3 attempts, 200 blocks apart│                        │ RitualWallet 0x532F…   │
-    └─────────────────────────────┘                        │ prepaid execution fees │
-                                                           └────────────────────────┘
-                        inside that one scheduled transaction:
+- **Block based deadlines**, not timestamps, so betting closing and the Scheduler
+  waking the contract can never disagree.
+- **3 resolution attempts, 200 blocks apart**, booked with the Scheduler at market
+  creation time via `numCalls` and `frequency`.
+- **A failed oracle read is never interpreted as NO.** Only after all 3 attempts
+  are exhausted does the market become `Invalid` and refundable.
+- **The winning side can still end up with zero backers** even after a successful
+  oracle read (everyone bet the other way). That case also resolves to `Invalid`
+  rather than dividing by zero in `claimWinnings`.
+- **`Scheduler.cancel` is called on successful resolution** so the remaining
+  booked retry slots are not wasted once the market has settled.
+- **The executor is picked per attempt**, not hardcoded, using
+  `TEEServiceRegistry.pickServiceByCapability` seeded with the market id, attempt
+  number, and execution index, so a single unavailable executor doesn't stall the
+  market forever.
 
-   TEEServiceRegistry 0x9644…  ──pickServiceByCapability(HTTP_CALL)──▶  executor address
-   HTTP precompile    0x0801   ──GET oracleUrl (in a TEE)───────────▶  demo oracle
-   jq  precompile     0x0803   ──jsonPath, outputType=uint256───────▶  observed value
-                                          │
-                                          ▼
-                        observed ⋈ target  →  Resolved(YES|NO)
-                        read failed 3×     →  Invalid (everyone refunds)
-```
+### Testing without a live chain
 
----
+`RitualPredict`'s constructor calls `IScheduler.approveScheduler` at deploy time,
+which means the contract cannot even be deployed on a clean local Hardhat network,
+let alone tested. I built mock contracts for the Scheduler, TEEServiceRegistry,
+RitualWallet, and the HTTP (`0x0801`) and JQ (`0x0803`) precompiles
+(`contracts/mocks/RitualMocks.sol`), and placed their bytecode at the real Ritual
+Chain addresses using `hardhat_setCode` in the test fixture. This let the full
+contract, including the Scheduler and precompile integration, run and be tested
+end to end locally, without needing the live chain.
 
-### Design decisions worth knowing
+18 tests cover market creation and validation, betting window enforcement, access
+control on the Scheduler callback, both successful and failed resolution paths,
+the empty winning pool edge case, and claim/refund payout correctness. Run with
+`npx hardhat test` from `hardhat/`.
 
-**Deadlines are block numbers, not timestamps.** The Scheduler fires at a _block_, so betting also
-closes at a _block_. That way "betting is closed" and "the Scheduler woke us" can never disagree,
-whatever the chain's block time does. `createMarket` takes human durations in seconds and converts
-them using the `blockTimeMs` fixed at deployment. Nothing on-chain reads `block.timestamp`.
+### A bug the review process caught
 
-**On Ritual Chain, `block.timestamp` is Unix milliseconds** (≈`1.786e12`), not seconds — verified
-against the live chain, not assumed. That is a good reason to avoid it entirely, which this contract
-does. Measured block time was ≈195 ms when this was written; run
-`npx hardhat run scripts/block-time.ts` to check it for yourself.
+While implementing the constructor, an early pass changed
+`approveScheduler(RitualChain.SCHEDULER)` to `approveScheduler(address(this))`,
+reasoning (incorrectly) that the contract should authorise itself as the callback
+target. Reading the interface comment carefully
+(`authorises schedulerContract to call back into / pay from the caller`) makes
+clear the argument should be the Scheduler's own address, not the contract's,
+since the whole point of the call is to give the Scheduler permission to call
+back in, not to give the contract permission over itself.
 
-**A failed oracle read is never a NO.** `onScheduledResolve` treats a precompile failure, a non-200
-response, an undecodable envelope, an executor error message, and an unparseable body all as
-_failures_, not as a negative outcome. The response decode happens through an external `try`, so
-malformed bytes surface as a caught failure instead of reverting the execution and rolling back the
-attempt counter.
+The bug did not cause any of the 18 tests to fail, because the mock Scheduler
+recorded whatever address it was given without validating it. That's a real gap:
+tests passing does not mean the logic is correct, only that nothing in the suite
+was checking that specific thing. I added a dedicated test asserting
+`approveScheduler` is called with the Scheduler's canonical address specifically
+(not just that it doesn't revert), so a regression like this would be caught
+automatically going forward.
 
-**Retries are the Scheduler's own mechanism.** `createMarket` books `numCalls = 3` executions
-`frequency = 200` blocks apart in a single `schedule()` call. Attempt 1 lands at `resolveBlock`; if
-it succeeds, the contract `cancel()`s the remainder; if all three fail, the market becomes `Invalid`
-and every stake is refundable. Each attempt re-rolls the TEE executor seed, so one unhealthy
-executor cannot sink a market. The callback is idempotent, so a leftover execution is harmless.
+### What I did not change
 
-**No executor is hardcoded.** The contract calls
-`TEEServiceRegistry.pickServiceByCapability(HTTP_CALL, true, seed, 8)` at resolution time.
-
-**Payouts are pull-based and loop-free.** `claimWinnings` computes
-`stake × totalPool ÷ winningPool` for the caller only. Integer division leaves sub-wei dust in the
-contract; that is deliberate and negligible.
-
-**Empty winning side → refundable.** Pari-mutuel has no denominator when nobody backed the winning
-answer, so the market records the outcome and observed value, then becomes `Invalid` so everyone
-takes their stake back.
-
-**Resolution parameters are immutable.** `target`, `comparator`, `oracleUrl`, `jsonPath`, and
-`resolveBlock` have no setter. The `ResolutionRuleSet` event records them at creation.
-
----
-
-## Prerequisites
-
-- Node.js 20+ and `pnpm`
-- A wallet with testnet RITUAL from <https://faucet.ritualfoundation.org>
-
-## Setup
-
-```bash
-cd hardhat
-pnpm install
-cp .env.example .env
-```
-
----
-
-## Scope
-
-Intentionally not included: an AMM, an order book, an order-matching engine, governance, a separate
-ERC-20, a centralized resolver, or an upgrade proxy. Staking uses the chain's native asset and the
-betting model is plain pari-mutuel: two running totals and one mapping per side.
-
-## Reference
-
-- Ritual Chain docs — <https://docs.ritualfoundation.org>
-- dApp skills — <https://github.com/ritual-foundation/ritual-dapp-skills>
-- Explorer — <https://explorer.ritualfoundation.org> · Faucet — <https://faucet.ritualfoundation.org>
+`bet()` and the payout math in `claimWinnings()` were already implemented in the
+starter and correct; I left that logic untouched. `getMarket`, `getMarkets`,
+`decodeHttpResponse`, and `_jqUint` were also already present and, after review,
+already correct against the precompile ABI reference.
