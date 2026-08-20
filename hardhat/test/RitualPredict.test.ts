@@ -203,6 +203,76 @@ describe("RitualPredict", async function () {
       assert.notEqual(m.outcome, 2); // Never NO — should be Unresolved
       assert.equal(m.outcome, 0); // Unresolved
     });
+
+    it("resolves on a later attempt after an earlier failure, cancelling only once", async function () {
+      const f = await deployRitualPredictFixture();
+
+      // Attempt 1: HTTP precompile returns non-200 → failure path.
+      await f.http.write.setResponse([encodeHttpResponse(500, "")]);
+      await f.createMarketWithDefaults();
+      const id = await f.predict.read.marketCount();
+      const market = await f.predict.read.getMarket([id]);
+      await f.mineToBlock(market.resolveBlock);
+
+      await f.triggerScheduledResolve(id, 1n);
+
+      // Attempt 1 failed: still Resolving, oracle did not resolve, and the schedule
+      // must NOT be cancelled — a later attempt is still allowed.
+      let m = await f.predict.read.getMarket([id]);
+      assert.equal(m.state, 2); // Resolving
+      assert.equal(m.outcome, 0); // Unresolved
+      assert.equal(m.attempts, 1);
+      assert.equal(await f.scheduler.read.getCallState([market.scheduleId]), 1); // not cancelled
+
+      // Attempt 2: oracle recovers 200 + value satisfying GTE target.
+      await f.http.write.setResponse([encodeHttpResponse(200, '{"price":4500}')]);
+      await f.jq.write.setResult([4500n]);
+      await f.triggerScheduledResolve(id, 1n);
+
+      m = await f.predict.read.getMarket([id]);
+      assert.equal(m.state, 3); // Resolved
+      assert.equal(m.outcome, 1); // Yes
+      assert.equal(m.attempts, 2);
+      assert.equal(await f.scheduler.read.getCallState([market.scheduleId]), 2); // cancelled
+    });
+
+    it("is a no-op when called again on an already-resolved market", async function () {
+      const f = await deployRitualPredictFixture();
+      await f.jq.write.setResult([4500n]);
+      await f.http.write.setResponse([encodeHttpResponse(200, '{"price":4500}')]);
+      await f.createMarketWithDefaults({ target: 4000n, comparator: 1 }); // GTE
+      const id = await f.predict.read.marketCount();
+      const market = await f.predict.read.getMarket([id]);
+      await f.mineToBlock(market.resolveBlock);
+
+      await f.triggerScheduledResolve(id, 1n);
+      const resolved = await f.predict.read.getMarket([id]);
+      assert.equal(resolved.state, 3); // Resolved
+      assert.equal(resolved.outcome, 1); // Yes
+
+      const eventsBefore = await f.publicClient.getContractEvents({
+        address: f.predict.address,
+        abi: f.predict.abi,
+        eventName: "MarketResolved",
+        fromBlock: 0n,
+      });
+
+      // Second callback (e.g. a leftover scheduled execution): must be a no-op.
+      await f.triggerScheduledResolve(id, 2n);
+
+      const after = await f.predict.read.getMarket([id]);
+      assert.equal(after.outcome, resolved.outcome); // unchanged
+      assert.equal(after.observedValue, resolved.observedValue); // unchanged
+      assert.equal(after.attempts, resolved.attempts); // unchanged
+
+      const eventsAfter = await f.publicClient.getContractEvents({
+        address: f.predict.address,
+        abi: f.predict.abi,
+        eventName: "MarketResolved",
+        fromBlock: 0n,
+      });
+      assert.equal(eventsAfter.length, eventsBefore.length); // no new MarketResolved event
+    });
   });
 
   // ────────────────── empty winning side ───────────────────────────
