@@ -410,6 +410,21 @@ contract RitualPredict {
         }
     }
 
+    /// Markets still accepting bets, newest first. Reuses getMarket() so a market whose
+    /// betting window has elapsed (but is still stored Open) counts as Closed, not Open.
+    function getOpenMarkets() external view returns (Market[] memory open) {
+        uint256 total = marketCount;
+        open = new Market[](total);
+        uint256 count;
+        for (uint256 i = total; i > 0; i--) {
+            Market memory m = getMarket(i);
+            if (m.state == MarketState.Open) open[count++] = m;
+        }
+        assembly ("memory-safe") {
+            mstore(open, count)
+        }
+    }
+
     function stakesOf(
         uint256 marketId,
         address account

@@ -377,6 +377,49 @@ describe("RitualPredict", async function () {
     });
   });
 
+  // ──────────────────── getOpenMarkets ─────────────────────────────
+
+  describe("getOpenMarkets", async function () {
+    it("returns only Open markets when a mix of Open, Closed, and Resolved exist", async function () {
+      const f = await deployRitualPredictFixture();
+      await f.jq.write.setResult([4500n]);
+      await f.http.write.setResponse([encodeHttpResponse(200, '{"price":4500}')]);
+
+      // Market 1: resolve it → Resolved.
+      await f.createMarketWithDefaults({ target: 4000n, comparator: 1 });
+      const id1 = await f.predict.read.marketCount();
+      const m1 = await f.predict.read.getMarket([id1]);
+      await f.mineToBlock(m1.resolveBlock);
+      await f.triggerScheduledResolve(id1);
+      assert.equal((await f.predict.read.getMarket([id1])).state, 3); // Resolved
+
+      // Market 2: leave Open. Give it a longer betting window so it is still
+      // accepting bets after market 3's closeBlock has passed.
+      await f.createMarketWithDefaults({ target: 4000n, comparator: 1, bettingSeconds: 90n });
+      const id2 = await f.predict.read.marketCount();
+      const m2 = await f.predict.read.getMarket([id2]);
+      assert.equal(m2.state, 0); // Open
+
+      // Market 3: closeBlock passed with no resolution → getMarket reports Closed.
+      await f.createMarketWithDefaults({ target: 4000n, comparator: 1, bettingSeconds: 30n });
+      const id3 = await f.predict.read.marketCount();
+      const m3 = await f.predict.read.getMarket([id3]);
+      await f.mineToBlock(m3.closeBlock);
+      assert.equal((await f.predict.read.getMarket([id3])).state, 1); // Closed
+
+      const open = await f.predict.read.getOpenMarkets();
+      assert.equal(open.length, 1);
+      assert.equal(BigInt(open[0].id), id2);
+      assert.equal(open[0].state, 0); // Open
+    });
+
+    it("returns an empty array when there are no markets", async function () {
+      const f = await deployRitualPredictFixture();
+      const open = await f.predict.read.getOpenMarkets();
+      assert.deepEqual(open, []);
+    });
+  });
+
   // ──────────────────── claimRefund ────────────────────────────────
 
   describe("claimRefund", async function () {
